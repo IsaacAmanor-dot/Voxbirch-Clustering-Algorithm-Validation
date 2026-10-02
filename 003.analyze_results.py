@@ -602,14 +602,14 @@ def make_plots(results, plot_dir):
         capsize=3,
     )
 
-    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_xlabel("VoxBirch Threshold")
     ax.set_ylabel("Wall Time (s)")
-    ax.set_title("VoxBirch Cutoff vs Wall Time")
+    ax.set_title("VoxBirch Threshold vs Wall Time")
     ax.grid(alpha=0.25)
 
     fig.tight_layout()
     fig.savefig(
-        plot_dir / "VoxBirch_cutoff_vs_walltime.png",
+        plot_dir / "VoxBirch_threshold_vs_walltime.png",
         dpi=300,
     )
     plt.close(fig)
@@ -622,14 +622,14 @@ def make_plots(results, plot_dir):
         marker="o",
     )
 
-    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_xlabel("VoxBirch Threshold")
     ax.set_ylabel("Mean Cluster Size")
-    ax.set_title("VoxBirch Cutoff vs Mean Cluster Size")
+    ax.set_title("VoxBirch Threshold vs Mean Cluster Size")
     ax.grid(alpha=0.25)
 
     fig.tight_layout()
     fig.savefig(
-        plot_dir / "VoxBirch_cutoff_vs_mean_cluster_size.png",
+        plot_dir / "VoxBirch_threshold_vs_mean_cluster_size.png",
         dpi=300,
     )
     plt.close(fig)
@@ -642,14 +642,14 @@ def make_plots(results, plot_dir):
         marker="o",
     )
 
-    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_xlabel("VoxBirch Threshold")
     ax.set_ylabel("Number of Singleton Clusters")
-    ax.set_title("VoxBirch Cutoff vs Singletons")
+    ax.set_title("VoxBirch Threshold vs Singletons")
     ax.grid(alpha=0.25)
 
     fig.tight_layout()
     fig.savefig(
-        plot_dir / "VoxBirch_cutoff_vs_singletons.png",
+        plot_dir / "VoxBirch_threshold_vs_singletons.png",
         dpi=300,
     )
     plt.close(fig)
