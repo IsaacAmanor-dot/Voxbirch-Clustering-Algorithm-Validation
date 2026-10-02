@@ -5,6 +5,10 @@ import math
 import re
 import statistics
 import subprocess
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from collections import defaultdict
 from pathlib import Path
 
@@ -516,6 +520,9 @@ def summarize_thresholds(results, thresholds):
                     internal_sd,
                 ),
 
+            "ci95_internal_total_half_width":
+                ci95_half_width(internal_times),
+
             "mean_external_wall_seconds":
                 wall_mean,
 
@@ -527,9 +534,128 @@ def summarize_thresholds(results, thresholds):
                     wall_mean,
                     wall_sd,
                 ),
+
+            "ci95_external_wall_half_width":
+                ci95_half_width(wall_times),
         })
 
     return summaries
+
+
+def make_plots(results, plot_dir):
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    grouped = defaultdict(list)
+
+    for result in results:
+        if result.get("status") == "VALID":
+            grouped[float(result["threshold"])].append(result)
+
+    cutoffs = sorted(grouped)
+
+    wall_means = []
+    wall_sds = []
+    mean_cluster_sizes = []
+    singleton_counts = []
+
+    for cutoff in cutoffs:
+        rows = grouped[cutoff]
+
+        wall_times = [
+            row["external_wall_seconds"]
+            for row in rows
+            if row.get("external_wall_seconds") is not None
+        ]
+
+        cluster_sizes = [
+            row["mean_cluster_size"]
+            for row in rows
+        ]
+
+        singletons = [
+            row["singleton_clusters"]
+            for row in rows
+        ]
+
+        wall_means.append(statistics.mean(wall_times))
+
+        if len(wall_times) > 1:
+            wall_sds.append(statistics.stdev(wall_times))
+        else:
+            wall_sds.append(0.0)
+
+        mean_cluster_sizes.append(
+            statistics.mean(cluster_sizes)
+        )
+
+        singleton_counts.append(
+            statistics.mean(singletons)
+        )
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    ax.errorbar(
+        cutoffs,
+        wall_means,
+        yerr=wall_sds,
+        marker="o",
+        capsize=3,
+    )
+
+    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_ylabel("Wall Time (s)")
+    ax.set_title("VoxBirch Cutoff vs Wall Time")
+    ax.grid(alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(
+        plot_dir / "VoxBirch_cutoff_vs_walltime.png",
+        dpi=300,
+    )
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    ax.plot(
+        cutoffs,
+        mean_cluster_sizes,
+        marker="o",
+    )
+
+    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_ylabel("Mean Cluster Size")
+    ax.set_title("VoxBirch Cutoff vs Mean Cluster Size")
+    ax.grid(alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(
+        plot_dir / "VoxBirch_cutoff_vs_mean_cluster_size.png",
+        dpi=300,
+    )
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    ax.plot(
+        cutoffs,
+        singleton_counts,
+        marker="o",
+    )
+
+    ax.set_xlabel("VoxBirch Cutoff")
+    ax.set_ylabel("Number of Singleton Clusters")
+    ax.set_title("VoxBirch Cutoff vs Singletons")
+    ax.grid(alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(
+        plot_dir / "VoxBirch_cutoff_vs_singletons.png",
+        dpi=300,
+    )
+    plt.close(fig)
+
+    print()
+    print(f"Analysis plots: {plot_dir}")
 
 
 def write_csv(rows, path, fieldnames):
@@ -557,6 +683,9 @@ def print_run_summary(results):
         f"{'Largest':>10}"
         f"{'Mean':>10}"
         f"{'Singletons':>12}"
+        f"{'Cluster_s':>12}"
+        f"{'Total_s':>12}"
+        f"{'Wall_s':>12}"
     )
 
     for result in results:
@@ -580,6 +709,9 @@ def print_run_summary(results):
             f"{result['largest_cluster']:>10}"
             f"{result['mean_cluster_size']:>10.2f}"
             f"{result['singleton_clusters']:>12}"
+            f"{result['clustering_seconds']:>12.3f}"
+            f"{result['internal_total_seconds']:>12.3f}"
+            f"{result['external_wall_seconds']:>12.3f}"
         )
 
 
@@ -654,9 +786,11 @@ def main():
         "mean_internal_total_seconds",
         "sd_internal_total_seconds",
         "cv_internal_total_percent",
+        "ci95_internal_total_half_width",
         "mean_external_wall_seconds",
         "sd_external_wall_seconds",
         "cv_external_wall_percent",
+        "ci95_external_wall_half_width",
     ]
 
     write_csv(
@@ -675,6 +809,9 @@ def main():
         summary_csv,
         summary_fields,
     )
+
+    plot_dir = SCRIPT_DIR / "zzz.analysis.plots"
+    make_plots(run_results, plot_dir)
 
     print_run_summary(run_results)
 
