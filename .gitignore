@@ -1,28 +1,18 @@
-# VoxBirch generated results
-*.out
-*.log
+# VoxBirch results
+zzz.results/
 
-# VoxBirch runtime directories
+# Legacy test results
+threshold_*/
+VoxBirch_*.out
 birch_tree.mdb/
+clustered_mol_ids.txt
 molecules/
 processed_mols/
 
-# Cluster assignment outputs
-clustered_mol_ids.txt
-
-# Threshold experiment results
-threshold_*/
-
-# SLURM outputs
+# SLURM output
 slurm-*.out
 slurm-*.err
 
 # Python cache
 __pycache__/
 *.pyc
-
-# Analysis outputs
-*.png
-*.pdf
-*.svg
-*.csv
