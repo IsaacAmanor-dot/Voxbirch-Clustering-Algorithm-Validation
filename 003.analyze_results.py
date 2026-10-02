@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import csv
+import math
 import re
 import statistics
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -14,7 +16,8 @@ def load_config():
     command = f'''
 source "{CONFIG_FILE}"
 printf '%s\\n' "$N_MOLECULES"
-printf '%s\\n' "$RESULTS_DIR"
+printf '%s\\n' "$THRESHOLD_RESULTS_DIR"
+printf '%s\\n' "$N_REPLICATES"
 printf '%s\\n' "${{THRESHOLDS[*]}}"
 '''
 
@@ -27,14 +30,20 @@ printf '%s\\n' "${{THRESHOLDS[*]}}"
 
     lines = result.stdout.strip().splitlines()
 
-    if len(lines) != 3:
+    if len(lines) != 4:
         raise RuntimeError("Could not read 000.config.sh")
 
     expected_molecules = int(lines[0])
     results_dir = Path(lines[1])
-    thresholds = lines[2].split()
+    n_replicates = int(lines[2])
+    thresholds = lines[3].split()
 
-    return expected_molecules, results_dir, thresholds
+    return (
+        expected_molecules,
+        results_dir,
+        n_replicates,
+        thresholds,
+    )
 
 
 def parse_cluster_file(path):
@@ -49,7 +58,9 @@ def parse_cluster_file(path):
                 continue
 
             if line.startswith("index:"):
-                current_cluster = int(line.split(":", 1)[1].strip())
+                current_cluster = int(
+                    line.split(":", 1)[1].strip()
+                )
 
                 if current_cluster in clusters:
                     raise ValueError(
@@ -64,7 +75,10 @@ def parse_cluster_file(path):
                         "Molecule encountered before cluster index"
                     )
 
-                match = re.match(r"mol\s+(\d+):\s+(.+)", line)
+                match = re.match(
+                    r"mol\s+(\d+):\s+(.+)",
+                    line,
+                )
 
                 if not match:
                     raise ValueError(
@@ -175,31 +189,62 @@ def read_text(path):
         return None
 
     value = path.read_text().strip()
+
     return value if value else None
 
 
-def analyze_threshold(
+def analyze_run(
     threshold,
+    replicate,
     expected_molecules,
     results_dir,
 ):
-    run_dir = results_dir / f"threshold_{threshold}"
+    replicate_padded = f"{replicate:02d}"
+
+    run_dir = (
+        results_dir
+        / f"threshold_{threshold}"
+        / f"replicate_{replicate_padded}"
+    )
+
     cluster_file = run_dir / "clustered_mol_ids.txt"
-    output_file = run_dir / f"VoxBirch_{threshold}.out"
+
+    output_file = (
+        run_dir
+        / f"VoxBirch_{threshold}_replicate_{replicate_padded}.out"
+    )
+
     wall_file = run_dir / "wall_time_seconds.txt"
     node_file = run_dir / "node.txt"
 
+    base_result = {
+        "threshold": threshold,
+        "replicate": replicate,
+    }
+
+    if not run_dir.exists():
+        return {
+            **base_result,
+            "status": "NOT_RUN",
+        }
+
+    if (run_dir / "VOXBIRCH_FAILED").exists():
+        return {
+            **base_result,
+            "status": "FAILED",
+        }
+
     if not cluster_file.exists():
         return {
-            "threshold": threshold,
-            "status": "NOT_RUN",
+            **base_result,
+            "status": "INCOMPLETE",
         }
 
     try:
         clusters = parse_cluster_file(cluster_file)
     except Exception as error:
         return {
-            "threshold": threshold,
+            **base_result,
             "status": f"PARSE_ERROR: {error}",
         }
 
@@ -217,16 +262,23 @@ def analyze_threshold(
     total_clusters = len(cluster_sizes)
     total_molecules = sum(cluster_sizes)
     unique_molecules = len(set(molecule_indices))
-    duplicate_assignments = total_molecules - unique_molecules
+    duplicate_assignments = (
+        total_molecules - unique_molecules
+    )
 
     if cluster_sizes:
         largest_cluster = max(cluster_sizes)
         smallest_cluster = min(cluster_sizes)
         mean_cluster_size = statistics.mean(cluster_sizes)
+
         singleton_clusters = sum(
-            size == 1 for size in cluster_sizes
+            size == 1
+            for size in cluster_sizes
         )
-        singleton_fraction = singleton_clusters / total_clusters
+
+        singleton_fraction = (
+            singleton_clusters / total_clusters
+        )
     else:
         largest_cluster = 0
         smallest_cluster = 0
@@ -273,7 +325,7 @@ def analyze_threshold(
     )
 
     return {
-        "threshold": threshold,
+        **base_result,
         "status": status,
         "number_of_molecules": total_molecules,
         "unique_molecules": unique_molecules,
@@ -300,9 +352,273 @@ def analyze_threshold(
     }
 
 
-def write_csv(results, output_csv):
-    fieldnames = [
+def mean_or_none(values):
+    values = [
+        value
+        for value in values
+        if value is not None
+    ]
+
+    if not values:
+        return None
+
+    return statistics.mean(values)
+
+
+def sd_or_none(values):
+    values = [
+        value
+        for value in values
+        if value is not None
+    ]
+
+    if len(values) < 2:
+        return None
+
+    return statistics.stdev(values)
+
+
+def cv_percent(mean_value, sd_value):
+    if mean_value in (None, 0) or sd_value is None:
+        return None
+
+    return 100.0 * sd_value / mean_value
+
+
+def ci95_half_width(values):
+    values = [
+        value
+        for value in values
+        if value is not None
+    ]
+
+    n = len(values)
+
+    if n < 2:
+        return None
+
+    sd = statistics.stdev(values)
+
+    t_critical = {
+        2: 12.706,
+        3: 4.303,
+        4: 3.182,
+        5: 2.776,
+    }.get(n, 1.96)
+
+    return t_critical * sd / math.sqrt(n)
+
+
+def summarize_thresholds(results, thresholds):
+    grouped = defaultdict(list)
+
+    for result in results:
+        if result.get("status") == "VALID":
+            grouped[result["threshold"]].append(result)
+
+    summaries = []
+
+    for threshold in thresholds:
+        rows = grouped.get(threshold, [])
+
+        clustering_times = [
+            row.get("clustering_seconds")
+            for row in rows
+        ]
+
+        internal_times = [
+            row.get("internal_total_seconds")
+            for row in rows
+        ]
+
+        wall_times = [
+            row.get("external_wall_seconds")
+            for row in rows
+        ]
+
+        voxelization_times = [
+            row.get("voxelization_seconds")
+            for row in rows
+        ]
+
+        cluster_counts = [
+            row.get("number_of_clusters")
+            for row in rows
+        ]
+
+        largest_clusters = [
+            row.get("largest_cluster")
+            for row in rows
+        ]
+
+        mean_cluster_sizes = [
+            row.get("mean_cluster_size")
+            for row in rows
+        ]
+
+        singleton_fractions = [
+            row.get("singleton_fraction")
+            for row in rows
+        ]
+
+        clustering_mean = mean_or_none(clustering_times)
+        clustering_sd = sd_or_none(clustering_times)
+
+        internal_mean = mean_or_none(internal_times)
+        internal_sd = sd_or_none(internal_times)
+
+        wall_mean = mean_or_none(wall_times)
+        wall_sd = sd_or_none(wall_times)
+
+        summaries.append({
+            "threshold": threshold,
+            "valid_replicates": len(rows),
+
+            "mean_number_of_clusters":
+                mean_or_none(cluster_counts),
+
+            "mean_largest_cluster":
+                mean_or_none(largest_clusters),
+
+            "mean_cluster_size":
+                mean_or_none(mean_cluster_sizes),
+
+            "mean_singleton_fraction":
+                mean_or_none(singleton_fractions),
+
+            "mean_voxelization_seconds":
+                mean_or_none(voxelization_times),
+
+            "mean_clustering_seconds":
+                clustering_mean,
+
+            "sd_clustering_seconds":
+                clustering_sd,
+
+            "cv_clustering_percent":
+                cv_percent(
+                    clustering_mean,
+                    clustering_sd,
+                ),
+
+            "ci95_clustering_half_width":
+                ci95_half_width(clustering_times),
+
+            "mean_internal_total_seconds":
+                internal_mean,
+
+            "sd_internal_total_seconds":
+                internal_sd,
+
+            "cv_internal_total_percent":
+                cv_percent(
+                    internal_mean,
+                    internal_sd,
+                ),
+
+            "mean_external_wall_seconds":
+                wall_mean,
+
+            "sd_external_wall_seconds":
+                wall_sd,
+
+            "cv_external_wall_percent":
+                cv_percent(
+                    wall_mean,
+                    wall_sd,
+                ),
+        })
+
+    return summaries
+
+
+def write_csv(rows, path, fieldnames):
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+        )
+
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def print_run_summary(results):
+    print()
+    print("VoxBirch threshold sensitivity analysis")
+    print()
+
+    print(
+        f"{'Threshold':<11}"
+        f"{'Rep':<6}"
+        f"{'Status':<12}"
+        f"{'Clusters':>10}"
+        f"{'Largest':>10}"
+        f"{'Mean':>10}"
+        f"{'Singletons':>12}"
+    )
+
+    for result in results:
+        threshold = result["threshold"]
+        replicate = result["replicate"]
+        status = result["status"]
+
+        if status != "VALID":
+            print(
+                f"{threshold:<11}"
+                f"{replicate:<6}"
+                f"{status:<12}"
+            )
+            continue
+
+        print(
+            f"{threshold:<11}"
+            f"{replicate:<6}"
+            f"{status:<12}"
+            f"{result['number_of_clusters']:>10}"
+            f"{result['largest_cluster']:>10}"
+            f"{result['mean_cluster_size']:>10.2f}"
+            f"{result['singleton_clusters']:>12}"
+        )
+
+
+def main():
+    (
+        expected_molecules,
+        results_dir,
+        n_replicates,
+        thresholds,
+    ) = load_config()
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    run_results = []
+
+    for threshold in thresholds:
+        for replicate in range(1, n_replicates + 1):
+            run_results.append(
+                analyze_run(
+                    threshold,
+                    replicate,
+                    expected_molecules,
+                    results_dir,
+                )
+            )
+
+    run_csv = (
+        results_dir
+        / "VoxBirch_threshold_runs.csv"
+    )
+
+    summary_csv = (
+        results_dir
+        / "VoxBirch_threshold_summary.csv"
+    )
+
+    run_fields = [
         "threshold",
+        "replicate",
         "status",
         "number_of_molecules",
         "unique_molecules",
@@ -323,78 +639,48 @@ def write_csv(results, output_csv):
         "node",
     ]
 
-    with output_csv.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=fieldnames,
-            extrasaction="ignore",
-        )
-
-        writer.writeheader()
-        writer.writerows(results)
-
-
-def print_summary(results, output_csv):
-    print()
-    print("VoxBirch threshold analysis")
-    print()
-
-    print(
-        f"{'Threshold':<11}"
-        f"{'Status':<12}"
-        f"{'Molecules':>11}"
-        f"{'Clusters':>10}"
-        f"{'Largest':>10}"
-        f"{'Mean':>10}"
-        f"{'Singletons':>12}"
-    )
-
-    for result in results:
-        threshold = result["threshold"]
-        status = result["status"]
-
-        if status == "NOT_RUN":
-            print(
-                f"{threshold:<11}"
-                f"{status:<12}"
-            )
-            continue
-
-        print(
-            f"{threshold:<11}"
-            f"{status:<12}"
-            f"{result.get('number_of_molecules', 0):>11}"
-            f"{result.get('number_of_clusters', 0):>10}"
-            f"{result.get('largest_cluster', 0):>10}"
-            f"{result.get('mean_cluster_size', 0):>10.2f}"
-            f"{result.get('singleton_clusters', 0):>12}"
-        )
-
-    print()
-    print(f"Analysis CSV: {output_csv}")
-
-
-def main():
-    expected_molecules, results_dir, thresholds = load_config()
-
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    output_csv = (
-        results_dir
-        / "VoxBirch_threshold_analysis.csv"
-    )
-
-    results = [
-        analyze_threshold(
-            threshold,
-            expected_molecules,
-            results_dir,
-        )
-        for threshold in thresholds
+    summary_fields = [
+        "threshold",
+        "valid_replicates",
+        "mean_number_of_clusters",
+        "mean_largest_cluster",
+        "mean_cluster_size",
+        "mean_singleton_fraction",
+        "mean_voxelization_seconds",
+        "mean_clustering_seconds",
+        "sd_clustering_seconds",
+        "cv_clustering_percent",
+        "ci95_clustering_half_width",
+        "mean_internal_total_seconds",
+        "sd_internal_total_seconds",
+        "cv_internal_total_percent",
+        "mean_external_wall_seconds",
+        "sd_external_wall_seconds",
+        "cv_external_wall_percent",
     ]
 
-    write_csv(results, output_csv)
-    print_summary(results, output_csv)
+    write_csv(
+        run_results,
+        run_csv,
+        run_fields,
+    )
+
+    summary_results = summarize_thresholds(
+        run_results,
+        thresholds,
+    )
+
+    write_csv(
+        summary_results,
+        summary_csv,
+        summary_fields,
+    )
+
+    print_run_summary(run_results)
+
+    print()
+    print(f"Run-level CSV: {run_csv}")
+    print(f"Threshold summary CSV: {summary_csv}")
 
 
 if __name__ == "__main__":
